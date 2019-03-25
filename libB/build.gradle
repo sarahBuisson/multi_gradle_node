@@ -1,0 +1,278 @@
+import groovy.json.JsonBuilder
+
+buildscript {
+    dependencies {
+        classpath 'io.github.microutils:kotlin-logging:1.6.22'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+//        classpath "org.jetbrains.kotlin:kotlin-frontend-plugin:0.0.44"
+
+
+    }
+}
+plugins {
+    id 'java' //need for the "from"
+    id 'org.jetbrains.kotlin.multiplatform'
+    id 'java-library'
+    id("maven-publish")
+    id "com.moowork.node"
+    // id "kotlin-platform-js"
+    //id 'org.jetbrains.kotlin.frontend'
+
+}
+kotlin {
+    targets {
+        fromPreset(presets.jvm, 'jvm') {
+            compilations.all {
+                tasks[compileKotlinTaskName].kotlinOptions {
+                    jvmTarget = '1.8'
+                }
+            }
+        }
+        fromPreset(presets.js, 'js') {
+            compilations.all {
+                tasks[compileKotlinTaskName].kotlinOptions {
+                    metaInfo = true
+                    outputFile = "${projectDir}/build/npm/${project.name}.js"
+                    sourceMap = true
+                    moduleKind = 'umd'
+                    main = 'call'
+                }
+            }
+        }
+    }
+    sourceSets {
+        commonMain {
+            kotlin.srcDir('src/main/kotlin')
+            resources.srcDir('src/main/resources')
+            dependencies {
+                implementation "io.github.microutils:kotlin-logging:$kotlin_logging_version"
+                implementation "org.jetbrains.kotlin:kotlin-stdlib"
+                implementation "org.jetbrains.kotlin:kotlin-test"
+                implementation "org.jetbrains.kotlin:kotlin-stdlib-common"
+                implementation 'io.mockk:mockk:1.9'
+                implementation(project(":libA"))
+            }
+        }
+
+
+        jvmTest {//TODO : commonTest instead of jvmtest, wwhen mockk.js will be better at it
+            kotlin.srcDir('src/test')
+            dependencies {
+                implementation "org.jetbrains.kotlin:kotlin-test-common"
+                implementation "org.jetbrains.kotlin:kotlin-test-annotations-common"
+                implementation 'io.mockk:mockk-common:1.9'
+            }
+        }
+        jvm {
+            dependencies {
+                implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
+                implementation "org.jetbrains.kotlin:kotlin-test-junit"
+
+            }
+        }
+        js {
+            dependencies {
+                implementation "org.jetbrains.kotlin:kotlin-stdlib-js:$kotlin_version"
+                implementation "io.github.microutils:kotlin-logging-js:$kotlin_logging_version"
+                implementation "org.jetbrains.kotlin:kotlin-test-js"
+                implementation 'io.mockk:mockk:1.7.17'
+            }
+        }
+    }
+
+    jvm {
+        compilations.main.kotlinOptions {
+            // Setup the Kotlin compiler options for the 'main' compilation:
+            jvmTarget = "1.8"
+        }
+        mavenPublication {
+            artifactId project.name + "-jvm"
+        }
+        preparePublishing(it)
+
+    }
+    js() {
+        mavenPublication {
+            artifactId project.name + "-js"
+        }
+        configurePublishingWithNPM(it, project.version)
+    }
+    metadata {
+        mavenPublication {
+            artifactId project.name + "-common"
+        }
+
+        preparePublishing(it)
+    }
+
+}
+
+
+def preparePublishing(target) {
+    publishing {
+        publications {
+            "mavenPublication${target.name}"(MavenPublication) { pub ->
+
+                from components[target.name]
+                pom {}
+                pom.withXml {
+                    def dependenciesNode = asNode().get('dependencies')
+                    if (dependenciesNode == null) {
+                        dependenciesNode = asNode().appendNode('dependencies')
+                    }
+
+                    //Iterate over the compile dependencies (we don't want the test ones), adding a <dependency> node for each
+                    configurations.implementation.allDependencies.each {
+                        def dependencyNode = dependenciesNode.appendNode('dependency')
+                        dependencyNode.appendNode('groupId', it.group)
+                        dependencyNode.appendNode('artifactId', it.name)
+                        dependencyNode.appendNode('version', it.version)
+                    }
+                }
+                def artifactName = "${buildDir}/libs/easy-rules-core-${target.name}-${project.version}.jar"
+                def artifactSourceName = "${buildDir}/libs/easy-rules-core-${target.name}-${project.version}-sources.jar"
+
+                artifact source:artifactName, classifier:"jar", extension:"jar"
+
+                if(file(artifactSourceName).exists()) {
+                    artifact source: artifactSourceName, classifier: "sources", extension: "jar"
+                }
+            }
+
+        }
+    }
+}
+
+def configurePublishingWithNPM (target, baseVersion) {
+
+    println("configurePublishingWithNPM")
+
+
+    task processPkg(type: Copy) {
+        System.out.println("build Package.json")
+        def dir=file('build/npm')
+        println(dir.absolutePath)
+        printClass( configurations.implementation)
+        printClass( configurations)
+        println( configurations.implementation.allDependencies)
+        println( configurations.jsImplementation)
+        println( configurations.jsImplementation.dependencies)
+        // println( configurations.jsImplementation.getBuildDependencies())
+
+        dir.mkdirs()
+        def packagejson = file('build/npm/package.json')
+        def packagejsondata= [name:project.name, version:baseVersion, dependencies:new HashMap()]
+
+        configurations.jsImplementation.allDependencies.each {
+            packagejsondata.dependencies.put(it.name,it.version)
+        }
+        packagejson.getParentFile().mkdirs()
+        packagejson.createNewFile()
+        packagejson.write(new JsonBuilder( packagejsondata ).toPrettyString())
+        //  packagejson.close()
+
+
+
+        System.out.println("enc of build Package.json:"+packagejson.path+packagejson.exists())
+    }
+
+    task execNpmBuild(type: Exec){
+        System.out.println("exec")
+        // commandLine
+        workingDir 'build/npm'
+        //executable "npm"
+        commandLine 'npm','install'
+        //"/usr/local/bin/npm","init"
+        def packagejson = file('build/npm/package.json')
+        println( packagejson.exists())
+        println( packagejson.path)
+        standardOutput = new ByteArrayOutputStream()
+        errorOutput = standardOutput
+        ignoreExitValue = true
+        doLast {
+            if (execResult.exitValue != 0) {
+                println(standardOutput.toString())
+                throw new GradleException("exec failed; see output above")
+            }
+        }
+    }
+    task execNpmLink(type: Exec){
+        System.out.println("exec")
+        // commandLine
+        workingDir 'build/npm'
+        executable "npm link"
+        //"/usr/local/bin/npm","init"
+        standardOutput = new ByteArrayOutputStream()
+        errorOutput = standardOutput
+        ignoreExitValue = true
+        doLast {
+            if (execResult.exitValue != 0) {
+                println(standardOutput.toString())
+                throw new GradleException("exec failed; see output above")
+            }
+        }
+    }
+
+
+    task prepublish(type: Copy) {
+        from '.'
+        into 'build/npm'
+        exclude 'package.json'
+        exclude 'build/npm'
+    }
+
+    npm_publish {
+        args = ['--access', 'public']
+        execOverrides {
+            it.workingDir = 'build/npm'
+        }
+    }
+    prepublish.dependsOn processPkg
+    execNpmLink.dependsOn processPkg
+    execNpmBuild.dependsOn processPkg
+    execNpmLink.dependsOn execNpmBuild
+    npm_publish.dependsOn execNpmLink
+
+    prepublish.dependsOn build
+
+    npm_publish.dependsOn prepublish
+}
+
+
+
+task listrepos {
+    doLast {
+        println "Repositories:"
+        project.repositories.each { println "Name: " + it.name + "; url: " + it.url }
+    }
+}
+
+def printClass(obj) {
+    if (obj == null) {
+        println("null")
+        return
+    }
+    println(obj.class)
+    def fields = obj.class.getDeclaredFields()
+    def methods = obj.class.getDeclaredMethods()
+    System.out.printf("%d fields:%n", fields.length);
+    for (field in fields) {
+        System.out.printf("%s %s %n",
+                // Modifier.toString(field.getModifiers()),
+                field.getType().getSimpleName(),
+                field.getName()
+        );
+    }
+    System.out.printf("%d methods:%n", methods.length);
+    for (field in methods) {
+        System.out.printf("%s %s (",
+                field.getReturnType().getSimpleName(),
+                field.getName()
+        );
+        for (p in field.getParameterTypes())
+            System.out.printf("%s, ", p.getSimpleName())
+        System.out.printf(")%n")
+    }
+    println("--end--")
+}
+
